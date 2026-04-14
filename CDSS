@@ -1,1 +1,685 @@
 
+#Loading of packages
+```{r}
+install.packages("dplyr") 
+install.packages("zoo") 
+install.packages("caret")
+install.packages("signal")
+install.packages("wavelets")
+install.packages("randomForest") 
+install.packages("mlbench") 
+install.packages("smotefamily")
+install.packages("ranger")
+install.packages("shiny") 
+install.packages("shinydashboard") 
+install.packages("plotly")
+install.packages("DT") 
+install.packages("ggfortify") 
+install.packages("flexdashboard") 
+install.packages("eegkit")
+install.packages("reticulate") 
+install.packages("e1071") 
+install.packages("ggplot2")
+install.packages("rpart")
+install.packages("xgboost")
+install.packages("glmnet")
+```
+
+#Loading Libraries
+```{r}
+library(dplyr)
+library(signal)
+library(wavelets)
+library(caret)
+library(zoo)
+library(eegkit)
+library(reticulate)
+library(stringr)
+library(ggplot2)
+library(e1071)
+library(reshape2)
+library(pROC)
+library(shiny)
+library(shinyWidgets)
+library(shinydashboard)
+library(flexdashboard)
+library(DT)
+library(rpart)
+library(xgboost)
+library(glmnet)
+```
+
+#Loading Dataset
+# Define file paths for Healthy and Schizophrenia EEG data
+```{r}
+norm_path <- "C:/Users/cex/Desktop/schizophrenia_diagnosis/schizophrenia/norm"
+sch_path  <- "C:/Users/cex/Desktop/schizophrenia_diagnosis/schizophrenia/sch"
+```
+
+# List all EEG files in respective directories and also count the number
+#of file in each folder
+```{r}
+norm_files <- list.files(norm_path, full.names = TRUE)
+sch_files  <- list.files(sch_path, full.names = TRUE)
+
+cat("Healthy files:", length(norm_files), "\n")
+cat("Schizophrenia files:", length(sch_files), "\n")
+
+```
+
+#Helper Function to Read Files Csv, npy, eea, it dectect the file type and load them
+
+```{r}
+read_eeg_file <- function(file_path) {
+  ext <- tools::file_ext(file_path)
+  
+  if (ext == "csv") {
+    return(read.csv(file_path, header = TRUE))
+    
+  } else if (ext == "npy") {
+    np <- reticulate::import("numpy", convert = TRUE)
+    return(as.data.frame(np$load(file_path)))
+    
+  } else if (ext == "eea") {
+    df <- tryCatch({
+      first_lines <- readLines(file_path, n = 5)
+      if (any(grepl(",", first_lines))) {
+        read.csv(file_path, header = FALSE)
+      } else if (any(grepl("\t", first_lines))) {
+        read.table(file_path, header = FALSE, sep = "\t", fill = TRUE)
+      } else {
+        read.table(file_path, header = FALSE, sep = "", fill = TRUE)
+      }
+    }, error = function(e) {
+      stop(paste("Could not read .eea file:", file_path))
+    })
+    return(df)
+    
+  } else {
+    stop(paste("Unsupported file format:", ext))
+  }
+}
+```
+
+
+#Load and also Label EEG Data
+```{r}
+load_eeg_folder <- function(file_list, label) {
+  all_data <- lapply(file_list, function(file) {
+    df <- read_eeg_file(file)
+    df$Label <- label
+    df$File. <- basename(file)
+    return(df)
+  })
+  combined <- bind_rows(all_data)
+  return(combined)
+}
+
+norm_data <- load_eeg_folder(norm_files, label = "Healthy")
+sch_data  <- load_eeg_folder(sch_files,  label = "Schizophrenia")
+```
+
+# Combine into a single dataset
+```{r}
+eeg_data <- bind_rows(norm_data, sch_data)
+cat("Combined EEG Dataset Dimensions:", dim(eeg_data), "\n")
+head(eeg_data)
+summary(eeg_data)
+```
+
+# Save combined dataset for quick future loading
+```{r}
+saveRDS(eeg_data, "EEG_Combined_Data.rds")
+```
+
+
+#EEG Signal Preprocessing
+```{r}
+fs <- 256  # Sampling frequency in Hz
+low_cut <- 1
+high_cut <- 45
+sample_file <- norm_files[1]
+raw_signal <- read_eeg_file(sample_file)$V1
+
+bf <- butter(4, c(low_cut, high_cut)/(fs/2), type = "pass")
+filtered_signal <- filtfilt(bf, raw_signal)
+wt <- dwt(filtered_signal, filter = "haar", n.levels = 4)
+wt@W <- lapply(wt@W, function(x) ifelse(abs(x) < 0.2, 0, x))
+denoised_signal <- idwt(wt)
+
+# Plot: Raw vs Filtered vs Denoised
+plot_df <- data.frame(
+  Time = 1:length(raw_signal) / fs,
+  Raw = raw_signal,
+  Filtered = filtered_signal,
+  Denoised = denoised_signal
+)
+
+ggplot(plot_df[1:1000,], aes(x=Time)) +
+  geom_line(aes(y=Raw, color="Raw")) +
+  geom_line(aes(y=Filtered, color="Filtered")) +
+  geom_line(aes(y=Denoised, color="Denoised")) +
+  labs(title="EEG Signal: Raw vs Filtered vs Denoised",
+       x="Time (s)", y="Amplitude (µV)") +
+  scale_color_manual(values=c("Raw"="red", "Filtered"="blue", "Denoised"="green")) +
+  theme_minimal()
+
+```
+
+#Epoching and Windowing
+```{r}
+epoch_length <- 2  # seconds
+samples_per_epoch <- epoch_length * fs
+n_epochs <- floor(length(denoised_signal) / samples_per_epoch)
+
+epochs <- matrix(
+  denoised_signal[1:(n_epochs * samples_per_epoch)],
+  ncol = samples_per_epoch,
+  byrow = TRUE
+)
+
+epochs_df <- as.data.frame(epochs)
+preproc <- preProcess(epochs_df, method = c("center", "scale"))
+epochs_norm <- predict(preproc, epochs_df)
+
+# Plot first 3 epochs
+matplot(t(epochs[1:3,]), type='l', lty=1,
+        main="Example of 2-sec EEG Epochs",
+        xlab="Samples", ylab="Amplitude (µV)")
+
+
+```
+# 2.4 Missing Data Handling
+```{r}
+set.seed(123)
+signal_with_na <- denoised_signal
+signal_with_na[sample(1:length(signal_with_na), 200)] <- NA
+
+signal_interp <- na.approx(signal_with_na, na.rm = FALSE)
+
+# Identify corrupted windows (>20% NA)
+window_size <- samples_per_epoch
+corrupt_idx <- sapply(
+  seq(1, length(signal_with_na), by = window_size),
+  function(i) {
+    window <- signal_with_na[i:min(i+window_size-1, length(signal_with_na))]
+    mean(is.na(window)) > 0.2
+  }
+)
+
+cat("Number of corrupted windows removed:", sum(corrupt_idx), "\n")
+
+```
+# Plot interpolation example
+```{r}
+interp_df <- data.frame(
+  Time = 1:length(signal_with_na) / fs,
+  Original = signal_with_na,
+  Interpolated = signal_interp
+)
+
+ggplot(interp_df[1:1000,], aes(x=Time)) +
+  geom_line(aes(y=Interpolated, color="Interpolated")) +
+  geom_point(aes(y=Original, color="Original"), size=1) +
+  labs(title="Missing Data Interpolation Example",
+       x="Time (s)", y="Amplitude (µV)") +
+  scale_color_manual(values=c("Original"="red", "Interpolated"="blue")) +
+  theme_minimal()
+
+```
+
+
+#Feature Extraction & Model Training
+```{r}
+#Time-Domain Features
+time_features <- data.frame(
+ Mean    = apply(epochs_norm, 1, mean),
+ Variance = apply(epochs_norm, 1, var),
+ Skewness = apply(epochs_norm, 1, skewness),
+ Kurtosis = apply(epochs_norm, 1, kurtosis)
+)
+```
+
+#Frequency-Domain Features
+```{r}
+compute_band_power <- function(epoch, fs) {
+  fft_vals <- fft(epoch)
+  power_spectrum <- (Mod(fft_vals)^2) / length(epoch)
+  freqs <- seq(0, fs - fs/length(epoch), length.out = length(epoch))
+  half <- 1:(length(epoch)/2)
+  power_spectrum <- power_spectrum[half]
+  freqs <- freqs[half]
+  c(
+    Delta = mean(power_spectrum[freqs >= 1  & freqs < 4]),
+    Theta = mean(power_spectrum[freqs >= 4  & freqs < 8]),
+    Alpha = mean(power_spectrum[freqs >= 8  & freqs < 13]),
+    Beta  = mean(power_spectrum[freqs >= 13 & freqs < 30])
+  )
+}
+
+freq_features <- as.data.frame(t(apply(epochs_norm, 1, compute_band_power, fs=fs)))
+
+```
+
+#Combine and Normalize
+```{r}
+feature_matrix <- bind_cols(time_features, freq_features)
+preproc_features <- preProcess(feature_matrix, method = c("center", "scale"))
+feature_matrix_norm <- predict(preproc_features, feature_matrix)
+```
+
+#PCA Dimensionality Reduction
+```{r}
+pca_res <- prcomp(feature_matrix_norm, center = FALSE, scale. = FALSE)
+explained_var <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+
+ggplot(data.frame(PC = 1:length(explained_var), Var = explained_var), aes(x = PC, y = Var)) +
+  geom_line() + geom_point() +
+  labs(title="PCA Scree Plot: Explained Variance",
+       x="Principal Component", y="Proportion of Variance") +
+  theme_minimal()
+```
+
+#Synthetic EHR Data
+```{r}
+set.seed(123)
+n_samples <- nrow(feature_matrix_norm)
+EHR_data <- data.frame(
+  Age = sample(18:65, n_samples, replace = TRUE),
+  Gender = sample(c("Male", "Female"), n_samples, replace = TRUE),
+  SymptomSeverity = sample(0:5, n_samples, replace = TRUE),
+  TreatmentHistory = sample(c("Yes", "No"), n_samples, replace = TRUE)
+)
+combined_data <- cbind(EHR_data, feature_matrix_norm)
+
+labels <- factor(c(rep("Healthy", n_samples/2), rep("Schizophrenia", n_samples/2)))
+model_data <- cbind(combined_data, Label = labels)
+model_data$Label <- factor(model_data$Label, levels = c("Schizophrenia", "Healthy"))
+
+```
+
+# Visualization for Age distribution
+```{r}
+ggplot(EHR_data, aes(x = Age)) +
+  geom_histogram(binwidth = 5, fill = "skyblue", color = "black") +
+  labs(title = "Histogram of Synthetic Age Distribution",
+       x = "Age", y = "Count") +
+  theme_minimal()
+
+# Symptom Severity Distribution
+ggplot(EHR_data, aes(x = SymptomSeverity)) +
+  geom_histogram(binwidth = 1, fill = "salmon", color = "black") +
+  labs(title = "Histogram of Symptom Severity",
+       x = "Symptom Severity (0-5)", y = "Count") +
+  theme_minimal()
+
+# Gender Distribution
+ggplot(EHR_data, aes(x = Gender, fill = Gender)) +
+  geom_bar(color = "black") +
+  labs(title = "Bar Plot of Gender Distribution",
+       x = "Gender", y = "Count") +
+  theme_minimal() +
+  scale_fill_manual(values = c("Male" = "steelblue", "Female" = "pink"))
+
+# Treatment History Distribution
+ggplot(EHR_data, aes(x = TreatmentHistory, fill = TreatmentHistory)) +
+  geom_bar(color = "black") +
+  labs(title = "Bar Plot of Treatment History",
+       x = "Treatment History", y = "Count") +
+  theme_minimal() +
+  scale_fill_manual(values = c("Yes" = "forestgreen", "No" = "orange"))
+
+```
+
+
+#Model Training
+```{r}
+set.seed(123)
+train_index <- createDataPartition(model_data$Label, p = 0.8, list = FALSE)
+train_data <- model_data[train_index, ]
+test_data <- model_data[-train_index, ]
+
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE,
+  savePredictions = TRUE
+)
+
+# Train the models
+rf_model <- train(Label ~ ., data = train_data, method = "rf", trControl = ctrl,
+                  importance = TRUE, metric = "ROC")
+svm_model <- train(Label ~ ., data = train_data, method = "svmRadial", trControl = ctrl,
+                   preProcess = c("center", "scale"), metric = "ROC")
+glm_model <- train(Label ~ ., data = train_data, method = "glm", family = "binomial",
+                   trControl = ctrl, metric = "ROC")
+dt_model <- train(Label ~ ., data = train_data, method = "rpart", trControl = ctrl,
+                  metric = "ROC")
+xgb_model <- train(Label ~ ., data = train_data, method = "xgbTree", trControl = ctrl,
+                   metric = "ROC")
+```
+# Save the trained models for the Shiny app to use
+```{r}
+saveRDS(rf_model, "rf_model.rds")
+saveRDS(svm_model, "svm_model.rds")
+saveRDS(glm_model, "glm_model.rds")
+saveRDS(dt_model, "dt_model.rds")
+saveRDS(xgb_model, "xgb_model.rds")
+```
+
+# Evaluate each model on the test data
+```{r}
+# Evaluate each model on the test data
+rf_pred <- predict(rf_model, newdata = test_data)
+svm_pred <- predict(svm_model, newdata = test_data)
+glm_pred <- predict(glm_model, newdata = test_data)
+dt_pred <- predict(dt_model, newdata = test_data)
+xgb_pred <- predict(xgb_model, newdata = test_data)
+
+rf_cm <- confusionMatrix(rf_pred, test_data$Label)
+svm_cm <- confusionMatrix(svm_pred, test_data$Label)
+glm_cm <- confusionMatrix(glm_pred, test_data$Label)
+dt_cm <- confusionMatrix(dt_pred, test_data$Label)
+xgb_cm <- confusionMatrix(xgb_pred, test_data$Label)
+
+
+cat("\nRandom Forest:\n"); print(rf_cm)
+cat("\nSVM (Radial):\n"); print(svm_cm)
+cat("\nLogistic Regression:\n"); print(glm_cm)
+cat("\nDecision Tree:\n"); print(dt_cm)
+cat("\nXGBoost:\n"); print(xgb_cm)
+
+rf_prob  <- predict(rf_model, newdata = test_data, type = "prob")[,1]
+svm_prob <- predict(svm_model, newdata = test_data, type = "prob")[,1]
+glm_prob <- predict(glm_model, newdata = test_data, type = "prob")[,1]
+
+
+```
+
+# Get probabilities for the new models
+```{r}
+dt_prob <- predict(dt_model, newdata = test_data, type = "prob")[,1]
+xgb_prob <- predict(xgb_model, newdata = test_data, type = "prob")[,1]
+
+rf_roc <- roc(test_data$Label, rf_prob, levels = c("Healthy", "Schizophrenia"))
+svm_roc <- roc(test_data$Label, svm_prob, levels = c("Healthy", "Schizophrenia"))
+glm_roc <- roc(test_data$Label, glm_prob, levels = c("Healthy", "Schizophrenia"))
+
+```
+
+# Create ROC curves for the new models
+```{r}
+dt_roc <- roc(test_data$Label, dt_prob, levels = c("Healthy", "Schizophrenia"))
+xgb_roc <- roc(test_data$Label, xgb_prob, levels = c("Healthy", "Schizophrenia"))
+
+```
+
+# Plot all ROC curves on a single graph
+```{r}
+plot(rf_roc, col="blue", main="ROC Curves")
+lines(svm_roc, col="red")
+lines(glm_roc, col="green")
+lines(dt_roc, col="purple")
+lines(xgb_roc, col="orange")
+legend("bottomright", legend=c("RF","SVM","GLM","DT", "XGBoost"),
+       col=c("blue","red","green","purple", "orange"), lwd=2)
+
+plot_confusion_matrix <- function(cm, title) {
+  cm_table <- as.table(cm$table)
+  cm_melt  <- melt(cm_table)
+  colnames(cm_melt) <- c("Prediction","Reference","Freq")
+  
+  ggplot(cm_melt, aes(x=Reference, y=Prediction, fill=Freq)) +
+    geom_tile() +
+    geom_text(aes(label=Freq), color="white", size=6) +
+    scale_fill_gradient(low="steelblue", high="darkred") +
+    ggtitle(title) +
+    theme_minimal()
+}
+
+plot_confusion_matrix(rf_cm, "Random Forest Confusion Matrix")
+plot_confusion_matrix(svm_cm, "SVM Confusion Matrix")
+plot_confusion_matrix(glm_cm, "Logistic Regression Confusion Matrix")
+plot_confusion_matrix(dt_cm, "Decision Tree Confusion Matrix")
+plot_confusion_matrix(xgb_cm, "XGBoost Confusion Matrix")
+
+get_metrics <- function(cm, probs, labels) {
+  acc <- cm$overall["Accuracy"]
+  sens <- cm$byClass["Sensitivity"]
+  spec <- cm$byClass["Specificity"]
+  prec <- cm$byClass["Pos Pred Value"]
+  rec  <- cm$byClass["Sensitivity"]
+  f1   <- 2 * (prec * rec) / (prec + rec)
+  auc  <- as.numeric(roc(labels, probs, levels = c("Healthy", "Schizophrenia"))$auc)
+  data.frame(Accuracy=acc, Precision=prec, Recall=rec, F1=f1, AUC=auc)
+}
+
+metrics_df <- rbind(
+  RandomForest = get_metrics(rf_cm, rf_prob, test_data$Label),
+  SVM          = get_metrics(svm_cm, svm_prob, test_data$Label),
+  LogisticReg  = get_metrics(glm_cm, glm_prob, test_data$Label),
+  DecisionTree = get_metrics(dt_cm, dt_prob, test_data$Label),
+  XGBoost      = get_metrics(xgb_cm, xgb_prob, test_data$Label)
+)
+
+print(metrics_df)
+```
+#Bar chart for Model performance comparison
+```{r}
+metrics_df$Model <- rownames(metrics_df)
+ggplot(metrics_df, aes(x = reorder(Model, Accuracy), y = Accuracy, fill = Model)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = round(Accuracy, 3)), vjust = -0.3, size = 3) +
+  labs(
+    title = "Model Performance Comparison (Accuracy)",
+    x = "Model",
+    y = "Accuracy"
+  ) +
+
+  theme_minimal() +
+  scale_fill_brewer(palette = "Paired") +
+  theme(legend.position = "none") +
+  ylim(0, 1)
+```
+
+# Prepare objects for Shiny App 
+```{r}
+pca_features <- data.frame(
+  PC1 = pca_res$x[, 1],
+  PC2 = pca_res$x[, 2],
+  Label = model_data$Label
+)
+
+model_data$RF_Prob <- predict(rf_model, newdata = model_data, type = "prob")[, 1]
+model_data$Risk_Category <- ifelse(model_data$RF_Prob > 0.75, "High Risk", "Moderate/Low Risk")
+rf_roc <- roc(model_data$Label, model_data$RF_Prob)
+
+```
+
+# Check objects exist
+```{r}
+stopifnot(exists("model_data"), exists("feature_matrix_norm"), exists("epochs_norm"))
+stopifnot(exists("rf_model"), exists("svm_model"), exists("glm_model"))
+
+# Prepare PCA features
+pca_features <- data.frame(
+  PC1 = pca_res$x[, 1],
+  PC2 = pca_res$x[, 2],
+  Label = model_data$Label
+)
+
+# Precompute RF probabilities & ROC
+model_data$RF_Prob <- predict(rf_model, newdata = model_data, type = "prob")[, 1]
+model_data$Risk_Category <- ifelse(model_data$RF_Prob > 0.75, "High Risk", "Moderate/Low Risk")
+rf_roc <- roc(model_data$Label, model_data$RF_Prob)
+```
+
+#shiny UI
+```{r}
+ui <- fluidPage(
+  titlePanel("EEG-CDSS: Schizophrenia Risk Forecasting"),
+  
+  tabsetPanel(
+    tabPanel("Patient Info",
+             sidebarLayout(
+               sidebarPanel(
+                 selectInput("patient_id", "Select Patient", choices = 1:nrow(model_data)),
+                 verbatimTextOutput("patient_summary")
+               ),
+               mainPanel(
+                 h4("Synthetic EHR Data"),
+                 dataTableOutput("ehr_table")
+               )
+             )
+    ),
+    
+    tabPanel("EEG Feature Summary",
+             fluidRow(
+               column(6, plotOutput("signal_summary")),
+               column(6, plotOutput("pca_plot"))
+             ),
+             hr(),
+             dataTableOutput("feature_table")
+    ),
+    
+    tabPanel("Forecast & Alert",
+             fluidRow(
+               column(6,
+                      flexdashboard::gaugeOutput("risk_gauge"),
+                      h4("Predicted Probability & Risk Category"),
+                      verbatimTextOutput("risk_summary"),
+                      h4("Clinical Recommendation"),
+                      verbatimTextOutput("risk_recommendation")
+                      
+               ),
+               column(6,
+                      plotOutput("roc_plot"),
+                      h5("ROC Curve (XGboost Model)")
+               )
+             )
+    ),
+    
+    tabPanel("Feature Importance",
+             h4("XGboost Feature Importance"),
+             plotOutput("feature_importance_plot")
+    )
+  )
+)
+```
+
+#Shiny Server
+```{r}
+server <- function(input, output, session) {
+  
+  # Patient Info
+  output$patient_summary <- renderPrint({
+    pid <- as.numeric(input$patient_id)
+    info <- model_data[pid, c("Age","Gender","SymptomSeverity","TreatmentHistory","Label","Risk_Category")]
+    print(info)
+  })
+  
+  output$ehr_table <- renderDataTable({
+    model_data %>% select(Age, Gender, SymptomSeverity, TreatmentHistory, Label, Risk_Category)
+  })
+  
+  # EEG Feature Summary
+  output$signal_summary <- renderPlot({
+    pid <- as.numeric(input$patient_id)
+    epoch_signal <- as.numeric(epochs_norm[pid, ])
+    plot(epoch_signal, type = 'l', col = 'blue',
+         main = paste("EEG Epoch Signal for Patient", pid),
+         xlab = "Sample", ylab = "Amplitude (Normalized)")
+  })
+  
+  output$pca_plot <- renderPlot({
+    ggplot(pca_features, aes(x = PC1, y = PC2, color = Label)) +
+      geom_point(size=2) +
+      theme_minimal() +
+      ggtitle("PCA Feature Scatterplot (PC1 vs PC2)")
+  })
+  
+  output$feature_table <- renderDataTable({
+    pid <- as.numeric(input$patient_id)
+    as.data.frame(feature_matrix_norm[pid, , drop=FALSE])
+  })
+  
+  # Forecast & Alert (Gauge)
+  output$risk_gauge <- flexdashboard::renderGauge({
+    pid <- as.numeric(input$patient_id)
+    risk_prob <- model_data$RF_Prob[pid]
+    flexdashboard::gauge(
+      value = risk_prob * 100,
+      min = 0, max = 100,
+      sectors = flexdashboard::gaugeSectors(
+        success = c(0,50),
+        warning = c(50,75),
+        danger = c(75,100)
+      )
+    )
+  })
+  
+  # Forecast & Alert: Recommendation
+  output$risk_recommendation <- renderPrint({
+    pid <- as.numeric(input$patient_id)
+    risk_prob <- model_data$RF_Prob[pid]
+    
+    if (risk_prob > 0.75) {
+      rec <- "High Risk: Recommend psychiatric evaluation and urgent referral."
+    } else if (risk_prob > 0.50) {
+      rec <- "Moderate Risk: Monitor symptoms and schedule follow-up."
+    } else {
+      rec <- "Low Risk: Continue routine observation."
+    }
+    rec
+  })
+  
+  
+  output$risk_summary <- renderPrint({
+    pid <- as.numeric(input$patient_id)
+    paste0("RF Probability: ", round(model_data$RF_Prob[pid], 3),
+           " | Risk: ", model_data$Risk_Category[pid])
+  })
+  
+  output$roc_plot <- renderPlot({
+    plot(rf_roc, col = "blue", main = "XGboost ROC Curve")
+    abline(a=0,b=1,lty=2,col="gray")
+  })
+  
+  # Feature Importance
+  output$feature_importance_plot <- renderPlot({
+    if ("randomForest" %in% class(rf_model)) {
+      rf_imp <- as.data.frame(importance(rf_model))
+      rf_imp$Feature <- rownames(rf_imp)
+      rf_imp <- rf_imp %>% arrange(desc(MeanDecreaseGini)) %>% head(20)
+      ggplot(rf_imp, aes(x = reorder(Feature, MeanDecreaseGini), y = MeanDecreaseGini)) +
+        geom_bar(stat='identity', fill='steelblue') +
+        coord_flip() +
+        theme_minimal() +
+        labs(title="Top 12 XGboost Feature Importances", x="", y="Importance")
+    } else {
+      rf_imp <- varImp(rf_model)$importance
+      # Handle models without "Overall" column
+      if (!"Overall" %in% colnames(rf_imp)) {
+        rf_imp$Overall <- rowMeans(rf_imp)
+      }
+      rf_imp$Feature <- rownames(rf_imp)
+      rf_imp <- rf_imp %>% arrange(desc(Overall)) %>% head(20)
+      ggplot(rf_imp, aes(x = reorder(Feature, Overall), y = Overall)) +
+        geom_bar(stat='identity', fill='steelblue') +
+        coord_flip() +
+        theme_minimal() +
+        labs(title="Top 12 XGboost Feature Importances", x="", y="Importance")
+    }
+  })
+}
+```
+
+
+
+#Run App
+```{r}
+shinyApp(ui = ui, server = server)
+```
+
+
