@@ -19,9 +19,9 @@ predictions.
   - Evaluation: 5 fold cross validation, accuracy, ROC-AUC
   
   **Results**
-    - Best models: XGBoost
-    - Accuracy: ~91-92%
-    - improved performance using multimodal data
+  - Best models: XGBoost
+   - Accuracy: ~91-92%
+   - improved performance using multimodal data
     
 **CDSS App**
  - Built with R shiny
