@@ -8,7 +8,11 @@ predictions.
 **Dataset**
 
 -EEG Data:Brain signal recordings (Healthy vs. Schizophrenia)
+
 -Age
+
 -Gender
+
 -Symptom severity
+
 -Treatment
