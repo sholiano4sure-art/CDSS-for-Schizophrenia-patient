@@ -23,7 +23,7 @@ predictions.
     - Accuracy: ~91-92%
     - improved performance using multimodal data
     
-    **CDSS App**
+**CDSS App**
       - Built with R shiny
       - select patient - automatic prediction
       - Output: Healthy / schizophrenia
