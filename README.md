@@ -6,13 +6,8 @@ A shiny web Application was develop to stimulate real world clinical usage, allo
 predictions.
 
 **Dataset**
-
 -EEG Data:Brain signal recordings (Healthy vs. Schizophrenia)
-
 -Age
-
 -Gender
-
 -Symptom severity
-
 -Treatment
