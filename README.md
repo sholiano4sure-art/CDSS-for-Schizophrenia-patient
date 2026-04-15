@@ -1,1 +1,1 @@
-#**Clinical Decision Support System for Schizophrnia**
+**Clinical Decision Support System For Shizophrenia **
