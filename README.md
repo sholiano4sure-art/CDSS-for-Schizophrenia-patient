@@ -11,3 +11,18 @@ predictions.
 - Gender
 - Symptom severity
 - Treatment
+**Methods**
+  - Feature extraction: time domain and frequency domain EEG feature
+  - Data Integration: EEG + EHR
+  - Models: Randdom forest, SVM, Logistic Regression, Decision Tree, XGBoost
+  - Evaluation: 5 fold cross validation, accuracy, ROC-AUC
+  **Results**
+    - Best models: XGBoost
+    - Accuracy: ~91-92%
+    - improved performance using multimodal data
+    **CDSS App**
+      - Built with **R shiny**
+      - select patient - automatic prediction
+      - Output: Healthy / schizophrenia
+    
+      
