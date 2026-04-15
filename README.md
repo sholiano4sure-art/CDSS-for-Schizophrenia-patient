@@ -24,8 +24,8 @@ predictions.
     - improved performance using multimodal data
     
 **CDSS App**
-      - Built with R shiny
-      - select patient - automatic prediction
-      - Output: Healthy / schizophrenia
+ - Built with R shiny
+ - select patient - automatic prediction
+ - Output: Healthy / schizophrenia
     
       
